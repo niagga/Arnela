@@ -25,7 +25,12 @@ env:
 jobs:
   e2e:
     name: Playwright smoke
-    runs-on: ubuntu-latest
+    # Fijado a 24.04 a propósito: `ubuntu-latest` ya resuelve a Ubuntu 26.04 y
+    # Playwright 1.52 (frontend/package.json) no soporta chromium ahí:
+    #   "Playwright does not support chromium on ubuntu26.04-x64"
+    # No lo vuelvas a `ubuntu-latest` sin antes subir @playwright/test y
+    # regenerar pnpm-lock.yaml.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     services:
