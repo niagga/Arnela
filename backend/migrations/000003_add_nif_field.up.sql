@@ -28,4 +28,8 @@ CREATE UNIQUE INDEX idx_clients_nif_unique ON clients(nif) WHERE deleted_at IS N
 CREATE UNIQUE INDEX idx_clients_dni_unique ON clients(dni) WHERE deleted_at IS NULL AND dni != '';
 
 -- Create index for NIF
-CREATE INDEX idx_clients_nif ON clients(nif) WHERE deleted_at IS NULL;
+-- `000002_create_clients_table` ya crea `idx_clients_nif` sobre la misma columna,
+-- así que en una base virgen el nombre existe y el CREATE sin guard abortaba la
+-- migración ("relation idx_clients_nif already exists"). IF NOT EXISTS lo vuelve
+-- idempotente para bases nuevas y no-op para las que ya aplicaron esta migración.
+CREATE INDEX IF NOT EXISTS idx_clients_nif ON clients(nif) WHERE deleted_at IS NULL;

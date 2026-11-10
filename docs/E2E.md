@@ -48,8 +48,39 @@ pnpm test:e2e
 
 ## CI / GitHub Actions
 
-- Usar **secrets** del repositorio (`E2E_ADMIN_EMAIL`, `E2E_ADMIN_PASSWORD`) nunca valores reales en el repo.
-- Job recomendado: Postgres + Redis + migraciones + API en background + `pnpm build` + `pnpm start` + `pnpm exec playwright install --with-deps` + `pnpm test:e2e`. Plantilla pendiente en `.github/workflows/e2e.yml` (tarea 2.9–2.10 del change `mvp-roadmap-2026`).
+Workflow: [`.github/workflows/e2e.yml`](../.github/workflows/e2e.yml).
+
+**Cuándo corre**
+
+- En cada `pull_request` a `main` (run bloqueante).
+- Manualmente: pestaña *Actions* → **E2E** → *Run workflow* (`workflow_dispatch`).
+
+Agrupa por ref con `concurrency`, así que un push nuevo cancela el run anterior del mismo PR.
+
+**Qué hace**
+
+| Paso | Detalle |
+|------|---------|
+| Services | `postgres:16-alpine` + `redis:7-alpine` (alineados a `docker-compose.yml`) |
+| API | `go build` y arranque en background; **aplica las migraciones al arrancar**, no hay paso de migrate aparte |
+| Health | espera `GET /health` hasta 120 s; si no responde, falla e imprime el log de la API |
+| Seed | registra `e2e-admin@arnela.test` con rol por defecto y lo asciende a `admin` por SQL |
+| Front | `pnpm install --frozen-lockfile` + `pnpm build` (con `NEXT_PUBLIC_API_URL` ya seteada) + `pnpm start` |
+| E2E | `playwright install --with-deps chromium` + `playwright test` con `PLAYWRIGHT_SKIP_WEBSERVER=1` |
+| Fallo | sube `playwright-report/`, `test-results/` y los logs de API/front como artefactos |
+
+**No requiere secrets del repositorio.** El job se autosiembra un admin efímero: email fijo
+`e2e-admin@arnela.test` y password aleatoria por corrida (`openssl rand -hex 16`, enmascarada en los logs).
+El seed **no** envía `role` al endpoint de registro: registra como `client` y asciende con un `UPDATE`.
+Definí `E2E_ADMIN_EMAIL` / `E2E_ADMIN_PASSWORD` como variables solo si corrés los E2E contra un entorno externo.
+
+**Reproducir el job en local**
+
+1. Levantá el stack como siempre (`docker-compose up -d`, `go run cmd/api/main.go`, `pnpm dev`).
+2. Sembrá un admin y copiá sus credenciales a `frontend/e2e/.env`.
+3. `PLAYWRIGHT_SKIP_WEBSERVER=1 pnpm test:e2e`.
+
+Las suites de Vitest **no** incluyen `e2e/` (excluido en `vitest.config.ts`), así que `pnpm test` sigue siendo rápido.
 
 ## Alcance actual (smoke)
 
