@@ -84,6 +84,25 @@ jobs:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
+      - name: Wait for services
+        # sqlx.Connect no reintenta (pkg/database/postgres.go:30): si Postgres
+        # todavía no acepta conexiones, la API muere al primer intento.
+        run: |
+          wait_for_port() {
+            local port="$1" name="$2"
+            for _ in $(seq 1 30); do
+              if (echo > "/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+                echo "$name listo en :$port"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "::error::$name no abrió el puerto :$port en 60s"
+            return 1
+          }
+          wait_for_port 5432 Postgres
+          wait_for_port 6379 Redis
+
       - name: Build API
         working-directory: backend
         run: go build -o "$RUNNER_TEMP/arnela-api" ./cmd/api
@@ -106,7 +125,8 @@ jobs:
             fi
             # Si el proceso ya murió, no tiene sentido esperar los 120s.
             if ! kill -0 "$API_PID" 2>/dev/null; then
-              echo "::error::El proceso de la API terminó antes de quedar sano. Log abajo."
+              reason=$(grep -aE "Failed to|panic:|migrations directory|permission denied" "$RUNNER_TEMP/api.log" 2>/dev/null | tail -n 3 | tr '\n' ' ' | cut -c1-400 || true)
+              echo "::error::El proceso de la API terminó antes de quedar sano. Causa: ${reason:-sin línea reconocible, ver log abajo}"
               tail -n 100 "$RUNNER_TEMP/api.log"
               exit 1
             fi
