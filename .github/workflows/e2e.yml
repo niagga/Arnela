@@ -89,9 +89,13 @@ jobs:
         run: go build -o "$RUNNER_TEMP/arnela-api" ./cmd/api
 
       - name: Start API
-        # Aplica las migraciones al arrancar (backend/cmd/api/main.go).
+        # La API resuelve `./migrations` relativo al CWD del proceso
+        # (backend/cmd/api/main.go), así que debe arrancar desde backend/.
+        # Arrancar desde la raíz del repo hace que muera al instante.
+        working-directory: backend
         run: |
           nohup "$RUNNER_TEMP/arnela-api" > "$RUNNER_TEMP/api.log" 2>&1 &
+          echo "API_PID=$!" >> "$GITHUB_ENV"
 
       - name: Wait for API health
         run: |
@@ -100,10 +104,16 @@ jobs:
               echo "API healthy after ${attempt} attempt(s)"
               exit 0
             fi
+            # Si el proceso ya murió, no tiene sentido esperar los 120s.
+            if ! kill -0 "$API_PID" 2>/dev/null; then
+              echo "::error::El proceso de la API terminó antes de quedar sano. Log abajo."
+              tail -n 100 "$RUNNER_TEMP/api.log"
+              exit 1
+            fi
             sleep 2
           done
           echo "::error::La API no quedó sana en 120s"
-          tail -n 80 "$RUNNER_TEMP/api.log"
+          tail -n 100 "$RUNNER_TEMP/api.log"
           exit 1
 
       - name: Seed E2E admin
@@ -158,6 +168,7 @@ jobs:
         working-directory: frontend
         run: |
           nohup env PORT=3000 pnpm start > "$RUNNER_TEMP/frontend.log" 2>&1 &
+          echo "FRONTEND_PID=$!" >> "$GITHUB_ENV"
 
       - name: Wait for frontend
         run: |
@@ -166,10 +177,15 @@ jobs:
               echo "Frontend listo tras ${attempt} intento(s)"
               exit 0
             fi
+            if ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
+              echo "::error::El proceso del frontend terminó antes de responder. Log abajo."
+              tail -n 100 "$RUNNER_TEMP/frontend.log"
+              exit 1
+            fi
             sleep 2
           done
           echo "::error::El frontend no respondió en 120s"
-          tail -n 80 "$RUNNER_TEMP/frontend.log"
+          tail -n 100 "$RUNNER_TEMP/frontend.log"
           exit 1
 
       - name: Install Playwright browsers
