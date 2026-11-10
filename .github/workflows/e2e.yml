@@ -210,7 +210,17 @@ jobs:
 
       - name: Install Playwright browsers
         working-directory: frontend
-        run: pnpm exec playwright install --with-deps chromium
+        run: |
+          set +e
+          out=$(pnpm exec playwright install --with-deps chromium 2>&1)
+          status=$?
+          echo "$out" | tail -n 40
+          if [ "$status" -ne 0 ]; then
+            # La anotación es pública: es la única vía de ver la causa sin logs.
+            reason=$(echo "$out" | grep -iE "error|unable to locate|eacces|not found|failed|denied" | tail -n 6 | tr '\n' ' ' | cut -c1-1000)
+            echo "::error::playwright install --with-deps falló (exit $status). Causa: ${reason:-sin línea reconocible}"
+            exit "$status"
+          fi
 
       - name: Run E2E
         working-directory: frontend
@@ -218,7 +228,16 @@ jobs:
           # El servidor ya está levantado arriba; Playwright no debe arrancar otro.
           PLAYWRIGHT_SKIP_WEBSERVER: "1"
           CI: "true"
-        run: pnpm exec playwright test
+        run: |
+          set +e
+          out=$(pnpm exec playwright test 2>&1)
+          status=$?
+          echo "$out" | tail -n 60
+          if [ "$status" -ne 0 ]; then
+            reason=$(echo "$out" | grep -iE "Error:|expect\(|failed|timed out|Timeout|refused|404|500" | tail -n 6 | tr '\n' ' ' | cut -c1-1000)
+            echo "::error::E2E falló (exit $status). Causa: ${reason:-sin línea reconocible}"
+            exit "$status"
+          fi
 
       - name: Upload Playwright report
         if: failure()
