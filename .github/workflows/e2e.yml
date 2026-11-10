@@ -1,0 +1,207 @@
+name: E2E
+
+# Smoke end-to-end del backoffice con Playwright sobre un stack real
+# (Postgres 16 + Redis 7 + API Go + front Next). Cierra las tareas 2.9 y 2.10
+# del change `mvp-roadmap-2026`.
+#
+# Los specs viven en `frontend/e2e/`. Este job se autosiembra el usuario admin:
+# no depende de secrets del repositorio. Ver `docs/E2E.md`.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  E2E_BASE_URL: http://127.0.0.1:3000
+  API_BASE_URL: http://127.0.0.1:8080/api/v1
+  # Se hornea en `pnpm build` (frontend/src/lib/api.ts); debe coincidir con la API del job.
+  NEXT_PUBLIC_API_URL: http://127.0.0.1:8080/api/v1
+
+jobs:
+  e2e:
+    name: Playwright smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        # Alineado a docker-compose.yml
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: arnela_db
+          POSTGRES_USER: arnela_user
+          POSTGRES_PASSWORD: arnela_ci_pass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U arnela_user -d arnela_db"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        # Alineado a docker-compose.yml, pero sin `requirepass`: el contenedor es
+        # efímero y solo se alcanza desde el propio runner.
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # API (backend/config/config.go)
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+      DB_USER: arnela_user
+      DB_PASSWORD: arnela_ci_pass
+      DB_NAME: arnela_db
+      DB_SSLMODE: disable
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      REDIS_DB: 0
+      JWT_SECRET: ci-e2e-only-not-a-real-secret
+      ENVIRONMENT: development
+      SERVER_PORT: 8080
+      CORS_ORIGINS: http://127.0.0.1:3000,http://localhost:3000
+      # Credenciales del admin sembrado por el job
+      E2E_ADMIN_EMAIL: e2e-admin@arnela.test
+      PGPASSWORD: arnela_ci_pass
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Build API
+        working-directory: backend
+        run: go build -o "$RUNNER_TEMP/arnela-api" ./cmd/api
+
+      - name: Start API
+        # Aplica las migraciones al arrancar (backend/cmd/api/main.go).
+        run: |
+          nohup "$RUNNER_TEMP/arnela-api" > "$RUNNER_TEMP/api.log" 2>&1 &
+
+      - name: Wait for API health
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:8080/health" > /dev/null; then
+              echo "API healthy after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::La API no quedó sana en 120s"
+          tail -n 80 "$RUNNER_TEMP/api.log"
+          exit 1
+
+      - name: Seed E2E admin
+        # Registra como `client` (rol por defecto) y asciende por SQL. No se envía
+        # `role` en el body: /auth/register es público y aceptaría cualquier rol.
+        run: |
+          set -euo pipefail
+          password="$(openssl rand -hex 16)"
+          echo "::add-mask::$password"
+          echo "E2E_ADMIN_PASSWORD=$password" >> "$GITHUB_ENV"
+
+          curl -fsS -X POST "$API_BASE_URL/auth/register" \
+            -H 'Content-Type: application/json' \
+            -d "{\"email\":\"$E2E_ADMIN_EMAIL\",\"password\":\"$password\",\"firstName\":\"E2E\",\"lastName\":\"Admin\"}" \
+            > /dev/null
+          echo "Usuario registrado: $E2E_ADMIN_EMAIL"
+
+          if ! command -v psql > /dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client
+          fi
+
+          psql -h 127.0.0.1 -U arnela_user -d arnela_db -v ON_ERROR_STOP=1 \
+            -c "UPDATE users SET role = 'admin' WHERE email = '${E2E_ADMIN_EMAIL}';"
+
+          role="$(psql -h 127.0.0.1 -U arnela_user -d arnela_db -tAc \
+            "SELECT role FROM users WHERE email = '${E2E_ADMIN_EMAIL}';")"
+          if [ "$role" != "admin" ]; then
+            echo "::error::El usuario E2E no quedó como admin (role='$role')"
+            exit 1
+          fi
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm build
+
+      - name: Start frontend
+        working-directory: frontend
+        run: |
+          nohup env PORT=3000 pnpm start > "$RUNNER_TEMP/frontend.log" 2>&1 &
+
+      - name: Wait for frontend
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -fsS "$E2E_BASE_URL" > /dev/null; then
+              echo "Frontend listo tras ${attempt} intento(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::El frontend no respondió en 120s"
+          tail -n 80 "$RUNNER_TEMP/frontend.log"
+          exit 1
+
+      - name: Install Playwright browsers
+        working-directory: frontend
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run E2E
+        working-directory: frontend
+        env:
+          # El servidor ya está levantado arriba; Playwright no debe arrancar otro.
+          PLAYWRIGHT_SKIP_WEBSERVER: "1"
+          CI: "true"
+        run: pnpm exec playwright test
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload stack logs
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: e2e-stack-logs
+          path: |
+            ${{ runner.temp }}/api.log
+            ${{ runner.temp }}/frontend.log
+          if-no-files-found: ignore
+          retention-days: 7
