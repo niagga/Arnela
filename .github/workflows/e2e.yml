@@ -244,6 +244,15 @@ jobs:
             exit "$status"
           fi
 
+          # Verde solo vale si los specs corrieron. Con credenciales ausentes los
+          # specs hacen test.skip y `playwright test` sale 0: falso positivo.
+          summary=$(echo "$out" | grep -E "[0-9]+ (passed|failed|skipped|flaky)" | tail -n 2 | tr '\n' ' ' | cut -c1-300)
+          echo "::notice::E2E resumen: ${summary:-sin resumen reconocible}"
+          if echo "$out" | grep -qE "[1-9][0-9]* skipped"; then
+            echo "::error::Hubo tests skipped: el verde es falso. Revisar el seed del admin y las variables E2E_ADMIN_*."
+            exit 1
+          fi
+
       - name: Upload Playwright report
         if: failure()
         uses: actions/upload-artifact@v5
